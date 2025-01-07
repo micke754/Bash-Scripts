@@ -1,0 +1,23 @@
+#!/bin/bash
+
+# Ensure the clipboard content is available
+clipboard_text=$(xclip -o -sel clipboard)
+
+# Check if the clipboard is empty
+if [[ -z "$clipboard_text" ]]; then
+    echo "Clipboard is empty. Nothing to send." >&2
+    exit 1
+fi
+
+# Define bracketed paste sequences
+BRACKETED_PASTE_START=$'\033[200~'
+BRACKETED_PASTE_END=$'\033[201~'
+
+# Wrap the clipboard text in bracketed paste sequences
+bracketed_text="${BRACKETED_PASTE_START}${clipboard_text}${BRACKETED_PASTE_END}"
+
+# Send the content to the target tmux pane
+tmux send-keys -t right clear
+tmux set-buffer "$bracketed_text"          # Set the clipboard content as tmux buffer
+tmux paste-buffer -t right                 # Paste buffer to the 'right' pane
+tmux send-keys -t right Enter              # Simulate pressing 'Enter' in the 'right' pane
