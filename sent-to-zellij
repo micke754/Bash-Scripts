@@ -1,0 +1,16 @@
+#!/bin/bash
+
+# Switch focus to the next pane
+zellij action focus-next-pane
+
+# Get clipboard content (use xsel or xclip on Linux if needed)
+clipboard_content=$(xsel --clipboard --output)
+
+# Write the clipboard content to the current pane
+zellij action write-chars "$clipboard_content"
+
+# Simulate pressing Enter (ASCII 13 + ASCII 10)
+zellij action write 13 10
+
+# Return focus to the next pane
+zellij action focus-next-pane
