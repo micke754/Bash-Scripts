@@ -4,9 +4,6 @@
 BRACKETED_PASTE_START=$'\033[200~'
 BRACKETED_PASTE_END=$'\033[201~'
 
-# Switch focus to the next pane
-zellij action focus-next-pane
-
 # Get clipboard content (use xsel or xclip on Linux if needed)
 clipboard_content=$(xsel --clipboard --output)
 
@@ -18,6 +15,9 @@ fi
 
 # Wrap clipboard content in bracketed paste sequences
 bracketed_content="${BRACKETED_PASTE_START}${clipboard_content}${BRACKETED_PASTE_END}"
+
+# Switch focus to the next pane
+zellij action focus-next-pane
 
 # Write the bracketed content to the current pane
 zellij action write-chars "$bracketed_content"
