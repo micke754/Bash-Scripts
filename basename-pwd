@@ -1,0 +1,8 @@
+#!/bin/bash
+
+# Get last part of current path
+current_dir=$(pwd)
+last_dir="${current_dir##*/}"
+
+# output result
+echo "$last_dir"
