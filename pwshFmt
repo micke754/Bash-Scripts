@@ -2,41 +2,43 @@
 
 # --- Script Configuration ---
 APP_NAME="pwshFmt"
-# Determine the settings file path based on XDG Base Directory Specification
 if [[ -n "$XDG_CONFIG_HOME" ]]; then
     CONFIG_DIR="$XDG_CONFIG_HOME/powershell"
 else
     CONFIG_DIR="$HOME/.config/powershell"
 fi
-SETTINGS_FILE_PATH="$CONFIG_DIR/PSScriptFormatterSettings.psd1" # PSScriptAnalyzer rule-based
+SETTINGS_FILE_PATH="$CONFIG_DIR/PSScriptFormatterSettings.psd1"
 # --- End Script Configuration ---
 
 # --- Global Variables for Options ---
 flag_verbose=false
 flag_silent=false
+flag_stdin_mode=false # New flag for Helix mode
 target_ps_script_path_arg=""
 # --- End Global Variables ---
 
 # --- Helper Functions ---
 show_help() {
     cat << EOF
-Usage: $APP_NAME [options] <path_to_script.ps1>
+Usage: $APP_NAME [options] [path_to_script.ps1]
 
-Formats a PowerShell script using Invoke-Formatter and a PSScriptAnalyzer-style settings file.
+Formats a PowerShell script using Invoke-Formatter.
+If <path_to_script.ps1> is provided, formats the file in-place.
+If --stdin is used, reads from stdin and writes formatted output to stdout.
 
 Options:
-  -v, --verbose     Enable verbose output.
-  -s, --silent      Enable silent output (only errors will be shown).
+  --stdin           Read script from stdin, write formatted script to stdout.
+  -v, --verbose     Enable verbose output (ignored in --stdin mode unless errors).
+  -s, --silent      Enable silent output (only errors, default for --stdin mode).
   -h, --help        Display this help message and exit.
 
-The settings file (PSScriptFormatterSettings.psd1) is expected at:
+The settings file (PSScriptFormatterSettings.psd1) for formatting rules is expected at:
   $SETTINGS_FILE_PATH
 EOF
 }
 
 _log_error() {
-    # Errors are always printed to stderr
-    echo "Error: $@" >&2
+    echo "$APP_NAME: Error: $@" >&2
 }
 
 _log_error_and_exit() {
@@ -49,25 +51,31 @@ _log_error_and_exit() {
 }
 
 _log_verbose() {
-    if [[ "$flag_verbose" == true ]]; then
+    # In stdin_mode, verbose is effectively off for general logging to avoid polluting stdout
+    if [[ "$flag_stdin_mode" == false && "$flag_verbose" == true ]]; then
         echo "$@"
     fi
 }
 
 _log_normal() {
-    # Printed in normal and verbose modes, but not silent
-    if [[ "$flag_silent" == false ]]; then
+    # In stdin_mode, normal logging is off to avoid polluting stdout
+    if [[ "$flag_stdin_mode" == false && "$flag_silent" == false ]]; then
         echo "$@"
     fi
 }
 # --- End Helper Functions ---
 
 # --- Argument Parsing ---
-# Needs to handle paths that might start with '-' if we didn't have options first
-# For now, simple loop is fine.
 args=()
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
+        --stdin)
+            flag_stdin_mode=true
+            # In stdin mode, we typically want silent behavior for logging,
+            # as stdout is reserved for the formatted script.
+            flag_silent=true
+            shift
+            ;;
         -v|--verbose)
             flag_verbose=true
             shift
@@ -83,69 +91,117 @@ while [[ "$#" -gt 0 ]]; do
         -*) # Unknown option
             _log_error_and_exit "Unknown option: $1" "show_help"
             ;;
-        *) # Accumulate non-option arguments
+        *) # Accumulate non-option arguments (potential file path)
             args+=("$1")
             shift
             ;;
     esac
 done
 
-# Assign positional arguments
-if [[ ${#args[@]} -eq 1 ]]; then
-    target_ps_script_path_arg="${args[0]}"
-elif [[ ${#args[@]} -gt 1 ]]; then
-    _log_error_and_exit "Too many script paths provided. Expected one." "show_help"
+# Assign positional arguments (script path)
+if [[ "$flag_stdin_mode" == false ]]; then
+    if [[ ${#args[@]} -eq 1 ]]; then
+        target_ps_script_path_arg="${args[0]}"
+    elif [[ ${#args[@]} -gt 1 ]]; then
+        _log_error_and_exit "Too many script paths provided. Expected one, or use --stdin." "show_help"
+    elif [[ ${#args[@]} -eq 0 ]]; then
+         _log_error_and_exit "No PowerShell script path provided and --stdin not used." "show_help"
+    fi
 fi
 
-# If silent is true, it overrides verbose for general logging purposes
+# If silent is true, it generally overrides verbose for logging purposes
 if [[ "$flag_silent" == true ]]; then
     flag_verbose=false
 fi
 # --- End Argument Parsing ---
 
-# --- Pre-execution Checks ---
-if [[ -z "$target_ps_script_path_arg" ]]; then
-    _log_error_and_exit "No PowerShell script path provided." "show_help"
-fi
 
-ABS_PS_SCRIPT_PATH=""
-# Resolve to an absolute path (robustly)
-if command -v realpath &> /dev/null; then
-    ABS_PS_SCRIPT_PATH="$(realpath "$target_ps_script_path_arg")"
-elif command -v readlink &> /dev/null && readlink -f / &> /dev/null; then
-    ABS_PS_SCRIPT_PATH="$(readlink -f "$target_ps_script_path_arg")"
-else
-    if [[ "${target_ps_script_path_arg:0:1}" == "/" ]] || [[ "${target_ps_script_path_arg:0:2}" == "~/" ]]; then
-        if [[ "${target_ps_script_path_arg:0:2}" == "~/" ]]; then
-            ABS_PS_SCRIPT_PATH="$HOME/${target_ps_script_path_arg:2}"
-        else
-            ABS_PS_SCRIPT_PATH="$target_ps_script_path_arg"
-        fi
-    else
-        ABS_PS_SCRIPT_PATH="$PWD/$target_ps_script_path_arg"
-    fi
-fi
-
-if [[ ! -f "$ABS_PS_SCRIPT_PATH" ]]; then
-    _log_error_and_exit "PowerShell script not found at '$ABS_PS_SCRIPT_PATH' (resolved from '$target_ps_script_path_arg')."
-fi
-
+# --- Pre-execution Checks (common for both modes) ---
 if ! command -v pwsh &> /dev/null; then
     _log_error_and_exit "'pwsh' (PowerShell) command not found. Please install PowerShell Core."
 fi
 
 if [[ ! -f "$SETTINGS_FILE_PATH" ]]; then
+    # This check is still important as settings are used in both modes
     _log_error_and_exit "PSScriptFormatter settings file not found at '$SETTINGS_FILE_PATH'."
 fi
 # --- End Pre-execution Checks ---
 
-_log_verbose "Verbose mode enabled."
+
+# ===========================
+# STDIN to STDOUT Mode (Helix)
+# ===========================
+if [[ "$flag_stdin_mode" == true ]]; then
+    # Read script content from stdin
+    script_content_from_stdin=$(cat)
+
+    if [[ -z "$script_content_from_stdin" ]]; then
+        # If stdin is empty, output nothing (or an empty string) and exit cleanly.
+        # Helix might send an empty buffer.
+        exit 0
+    fi
+
+    # PowerShell logic for stdin mode
+    # Outputs formatted script to its STDOUT, or error details to its STDERR.
+    CORE_PWSH_LOGIC_STDIN=$(cat <<'EOF'
+$ErrorActionPreference = 'Stop'
+# $scriptContent and $settingsPath will be passed
+# $pwshVerboseFlag is less relevant here as stdout is sacred
+
+# No Test-Path for settings here if we assume it was checked by bash
+# No module install messages to stdout
+
+# Ensure PSScriptAnalyzer is available
+if (-not (Get-Module PSScriptAnalyzer -ListAvailable)) {
+    # Attempt install silently, errors will go to stderr if they occur
+    try { Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop > $null } catch { exit 1 }
+}
+Import-Module PSScriptAnalyzer -ErrorAction Stop
+
+try {
+    # $settingsPath is the path to the .psd1 file
+    $formattedContent = Invoke-Formatter -ScriptDefinition $scriptContent -Settings $settingsPath -ErrorAction Stop
+    Write-Output $formattedContent # This is the crucial part for Helix: formatted script to STDOUT
+} catch {
+    # For Helix, error details should go to STDERR
+    $errorMessage = "$($APP_NAME): PowerShell Formatting Error:`n" # APP_NAME won't expand here, fine
+    $errorMessage += "Exception Type: $($_.Exception.GetType().FullName)`n"
+    $errorMessage += "Exception Message: $($_.Exception.Message)`n"
+    if ($_.ScriptStackTrace) {
+        $errorMessage += "ScriptStackTrace:`n$($_.ScriptStackTrace)`n"
+    }
+    Write-Error $errorMessage # Send to STDERR
+    exit 1
+}
+EOF
+    )
+
+    pwsh_args_stdin=("-scriptContent" "$script_content_from_stdin" "-settingsPath" "$SETTINGS_FILE_PATH")
+    # pwshVerboseFlag not really used for logging output in stdin mode
+    # pwsh_args_stdin+=("-pwshVerboseFlag" '$false')
+
+    FULL_PWSH_COMMAND_STDIN="& { param([string]\$scriptContent, [string]\$settingsPath); $CORE_PWSH_LOGIC_STDIN } ${pwsh_args_stdin[*]}"
+
+    # Execute PowerShell. Its STDOUT is what Helix wants. STDERR for errors.
+    # We don't need to capture output in a file here; let it flow.
+    if pwsh -NoProfile -Command "$FULL_PWSH_COMMAND_STDIN"; then
+        exit 0 # Success, formatted output went to stdout
+    else
+        exit 1 # Failure, PowerShell script should have written error to its stderr
+    fi
+fi
+
+
+# ===========================
+# File In-Place Mode (Original)
+# ===========================
+_log_verbose "Verbose mode enabled (file mode)."
 _log_verbose "Attempting to format: '$ABS_PS_SCRIPT_PATH'"
 _log_verbose "Using settings from (path): '$SETTINGS_FILE_PATH'"
 _log_verbose "---"
 
 initial_timestamp=""
-if [[ "$flag_silent" == false ]]; then # Get timestamp only if we might report on it
+if [[ "$flag_silent" == false ]]; then
     if command -v stat &> /dev/null; then
         if stat -c %Y "$ABS_PS_SCRIPT_PATH" &> /dev/null; then
             initial_timestamp=$(stat -c %Y "$ABS_PS_SCRIPT_PATH")
@@ -156,25 +212,19 @@ if [[ "$flag_silent" == false ]]; then # Get timestamp only if we might report o
     fi
 fi
 
-# --- PowerShell Execution ---
-# Start timer
 start_time_ns=$(date +%s%N)
 
-# PowerShell script block. It should not produce much stdout on its own if not verbose.
-# Errors from PowerShell (Write-Error, or Write-Output from catch) will be captured.
-CORE_PWSH_LOGIC=$(cat <<'EOF'
+CORE_PWSH_LOGIC_FILE=$(cat <<'EOF'
 $ErrorActionPreference = 'Stop'
-# $scriptToFormatPath and $settingsPath (file path) will be passed
-# $pwshVerboseFlag will indicate if PowerShell itself should be verbose
 
 if ($pwshVerboseFlag) {
-    Write-Host "PowerShell side (inside invoked block, verbose mode):"
+    Write-Host "PowerShell side (inside invoked block, verbose mode, file mode):"
     Write-Host "  Script to format: $scriptToFormatPath"
     Write-Host "  Settings file path: $settingsPath"
 }
 
 if (-not (Test-Path -Path $scriptToFormatPath -PathType Leaf)) {
-    Write-Error "FATAL: PowerShell cannot find the script at: '$scriptToFormatPath'" # This Write-Error goes to stderr
+    Write-Error "FATAL: PowerShell cannot find the script at: '$scriptToFormatPath'"
     exit 1
 }
 if (-not (Test-Path -Path $settingsPath -PathType Leaf)) {
@@ -199,121 +249,81 @@ try {
         Write-Host "---"
         Write-Host "Formatting script with Invoke-Formatter using PSScriptAnalyzer-style settings file..."
     }
-
     $originalContent = Get-Content -Path $scriptToFormatPath -Raw -Encoding UTF8
     $formattedContent = Invoke-Formatter -ScriptDefinition $originalContent -Settings $settingsPath -ErrorAction Stop
-
     if ($formattedContent -ne $originalContent) {
         Set-Content -Path $scriptToFormatPath -Value $formattedContent -Encoding UTF8 -Force
-        # This specific message can be useful for the calling bash script to know if changes were made
-        # Let's make it consistent and easy to parse if needed, or just rely on timestamp.
-        # For now, PowerShell will output this only in its verbose mode. Bash will determine actual message.
         if ($pwshVerboseFlag) { Write-Host "PowerShell: Script '$scriptToFormatPath' has been formatted." -ForegroundColor Green }
-        # To signal change without verbose output, we could use a specific exit code or a marker string.
-        # For now, bash timestamp check is primary.
     } else {
         if ($pwshVerboseFlag) { Write-Host "PowerShell: Script '$scriptToFormatPath' is already formatted. No changes made." -ForegroundColor Cyan }
     }
-
 } catch {
-    # Construct detailed error message and send to STDOUT so bash can capture it.
-    # Bash will then decide if/how to show it based on its verbosity.
-    $errorMessage = "PowerShell Error Details:`n"
+    $errorMessage = "PowerShell Error Details (file mode):`n"
     $errorMessage += "Exception Type: $($_.Exception.GetType().FullName)`n"
     $errorMessage += "Exception Message: $($_.Exception.Message)`n"
-    if ($_.ScriptStackTrace) {
-        $errorMessage += "ScriptStackTrace:`n$($_.ScriptStackTrace)`n"
-    }
-    if ($_.Exception.InnerException) {
-        $errorMessage += "Inner Exception Type: $($_.Exception.InnerException.GetType().FullName)`n"
-        $errorMessage += "Inner Exception Message: $($_.Exception.InnerException.Message)`n"
-    }
-    Write-Output $errorMessage # This goes to stdout, captured by bash
-    exit 1 # Critical: ensure non-zero exit code
+    if ($_.ScriptStackTrace) { $errorMessage += "ScriptStackTrace:`n$($_.ScriptStackTrace)`n" }
+    if ($_.Exception.InnerException) { $errorMessage += "Inner Exception Type: $($_.Exception.InnerException.GetType().FullName)`n"; $errorMessage += "Inner Exception Message: $($_.Exception.InnerException.Message)`n" }
+    Write-Output $errorMessage # Captured by bash
+    exit 1
 }
 EOF
 )
 
-# Prepare arguments for PowerShell script block
-pwsh_args=("-scriptToFormatPath" "$ABS_PS_SCRIPT_PATH" "-settingsPath" "$SETTINGS_FILE_PATH")
+pwsh_args_file=("-scriptToFormatPath" "$ABS_PS_SCRIPT_PATH" "-settingsPath" "$SETTINGS_FILE_PATH")
 if [[ "$flag_verbose" == true ]]; then
-    pwsh_args+=("-pwshVerboseFlag" '$true') # Pass $true as a string that PS interprets
+    pwsh_args_file+=("-pwshVerboseFlag" '$true')
 else
-    pwsh_args+=("-pwshVerboseFlag" '$false')
+    pwsh_args_file+=("-pwshVerboseFlag" '$false')
 fi
+FULL_PWSH_COMMAND_FILE="& { param([string]\$scriptToFormatPath, [string]\$settingsPath, [bool]\$pwshVerboseFlag); $CORE_PWSH_LOGIC_FILE } ${pwsh_args_file[*]}"
 
-FULL_PWSH_COMMAND="& { param([string]\$scriptToFormatPath, [string]\$settingsPath, [bool]\$pwshVerboseFlag); $CORE_PWSH_LOGIC } ${pwsh_args[*]}"
-
-# Temporary file to capture PowerShell's combined stdout and stderr
 pwsh_output_capture_file=$(mktemp)
-# Ensure cleanup of temp file
-trap 'rm -f "$pwsh_output_capture_file"' EXIT
+trap 'rm -f "$pwsh_output_capture_file"' EXIT # Ensure cleanup
 
 execution_succeeded=false
-if pwsh -NoProfile -Command "$FULL_PWSH_COMMAND" > "$pwsh_output_capture_file" 2>&1; then
+if pwsh -NoProfile -Command "$FULL_PWSH_COMMAND_FILE" > "$pwsh_output_capture_file" 2>&1; then
     execution_succeeded=true
 else
-    execution_succeeded=false # pwsh command itself failed or PS script exited with non-zero
+    execution_succeeded=false
 fi
-# --- End PowerShell Execution ---
 
-
-# --- Post-execution Processing & Reporting ---
-# Stop timer
 end_time_ns=$(date +%s%N)
 duration_ns=$((end_time_ns - start_time_ns))
 
 final_timestamp=""
 file_was_modified=false
-if [[ "$flag_silent" == false || "$execution_succeeded" == false ]]; then # Need timestamp if not silent or if error
+if [[ "$flag_silent" == false || "$execution_succeeded" == false ]]; then
     if command -v stat &> /dev/null; then
-        if stat -c %Y "$ABS_PS_SCRIPT_PATH" &> /dev/null; then
-            final_timestamp=$(stat -c %Y "$ABS_PS_SCRIPT_PATH")
-        elif stat -f %m "$ABS_PS_SCRIPT_PATH" &> /dev/null; then
-            final_timestamp=$(stat -f %m "$ABS_PS_SCRIPT_PATH")
-        fi
+        if stat -c %Y "$ABS_PS_SCRIPT_PATH" &> /dev/null; then final_timestamp=$(stat -c %Y "$ABS_PS_SCRIPT_PATH"); fi
+        if [[ -z "$final_timestamp" ]] && stat -f %m "$ABS_PS_SCRIPT_PATH" &> /dev/null; then final_timestamp=$(stat -f %m "$ABS_PS_SCRIPT_PATH"); fi
     fi
     if [[ -n "$initial_timestamp" && -n "$final_timestamp" && "$initial_timestamp" != "$final_timestamp" ]]; then
         file_was_modified=true
     fi
 fi
 
-# Report based on success and verbosity
 if [[ "$execution_succeeded" == true ]]; then
     if [[ "$file_was_modified" == true ]]; then
         _log_normal "Formatted: '$ABS_PS_SCRIPT_PATH'"
     else
         _log_normal "No changes: '$ABS_PS_SCRIPT_PATH' (already compliant)"
     fi
-    _log_verbose "$(cat "$pwsh_output_capture_file")" # Show PS output in verbose
+    _log_verbose "$(cat "$pwsh_output_capture_file")"
 else
-    # Error occurred
     _log_error "Formatting failed for '$ABS_PS_SCRIPT_PATH'."
-    # PowerShell error details (from Write-Output in catch or Write-Error) are in the capture file.
-    # These should always be shown on error, regardless of silent/verbose, as they are vital.
-    cat "$pwsh_output_capture_file" >&2
+    cat "$pwsh_output_capture_file" >&2 # Show PS errors
 fi
 
-# Report execution time (not in silent mode, unless an error occurred for context)
 if [[ "$flag_silent" == false || "$execution_succeeded" == false ]]; then
-    duration_ms=$((duration_ns / 1000000))
-    # Using awk for floating point seconds for better readability
     duration_s=$(awk -v ns="$duration_ns" 'BEGIN{printf "%.3f", ns/1000000000}')
-
-    # In silent mode, only print time if there was an error. Otherwise, print for normal/verbose.
-    if [[ "$execution_succeeded" == false || "$flag_silent" == false ]]; then
-         # For normal/verbose, always print time. For silent, only on error.
-        if [[ "$flag_silent" == false ]]; then
-            _log_normal "Execution time: ${duration_s}s"
-        elif [[ "$execution_succeeded" == false && "$flag_silent" == true ]]; then
-            # If silent and error, print time to stderr for context
-            echo "Execution time: ${duration_s}s" >&2
-        fi
+    if [[ "$flag_silent" == false ]]; then
+        _log_normal "Execution time: ${duration_s}s"
+    elif [[ "$execution_succeeded" == false && "$flag_silent" == true ]]; then
+        echo "Execution time: ${duration_s}s" >&2
     fi
-    _log_verbose "Detailed execution time: ${duration_ns}ns (${duration_ms}ms)"
+    _log_verbose "Detailed execution time: ${duration_ns}ns ($(awk -v ns="$duration_ns" 'BEGIN{printf "%d", ns/1000000}')ms)"
 fi
 
-# Final exit code
 if [[ "$execution_succeeded" == true ]]; then
     exit 0
 else
