@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+
+# --- Configuration ---
+if [[ -n "$XDG_CONFIG_HOME" ]]; then
+    CONFIG_DIR="$XDG_CONFIG_HOME/powershell"
+else
+    CONFIG_DIR="$HOME/.config/powershell"
+fi
+# THIS IS THE PATH TO THE SETTINGS FILE
+SETTINGS_FILE_PATH="$CONFIG_DIR/PSScriptFormatterSettings.psd1"
+# --- End Configuration ---
+
+# Function to display help (omitted for brevity)
+show_help() {
+    echo "Usage: pwshFmt <path_to_script.ps1>"
+    echo ""
+    echo "Formats a PowerShell script using Invoke-Formatter and a PSScriptAnalyzer-style settings file."
+    echo "The settings file (PSScriptFormatterSettings.psd1) is expected at:"
+    echo "  \$XDG_CONFIG_HOME/powershell/PSScriptFormatterSettings.psd1"
+    echo "  (or \$HOME/.config/powershell/PSScriptFormatterSettings.psd1 if \$XDG_CONFIG_HOME is not set)"
+}
+
+# Check for help flag
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    show_help
+    exit 0
+fi
+
+if [[ -z "$1" ]]; then
+    echo "Error: No PowerShell script path provided." >&2
+    show_help
+    exit 1
+fi
+
+PS_SCRIPT_PATH_ARG="$1"
+ABS_PS_SCRIPT_PATH=""
+
+if command -v realpath &> /dev/null; then
+    ABS_PS_SCRIPT_PATH="$(realpath "$PS_SCRIPT_PATH_ARG")"
+elif command -v readlink &> /dev/null && readlink -f / &> /dev/null; then
+    ABS_PS_SCRIPT_PATH="$(readlink -f "$PS_SCRIPT_PATH_ARG")"
+else
+    if [[ "${PS_SCRIPT_PATH_ARG:0:1}" == "/" ]] || [[ "${PS_SCRIPT_PATH_ARG:0:2}" == "~/" ]]; then
+        if [[ "${PS_SCRIPT_PATH_ARG:0:2}" == "~/" ]]; then
+            ABS_PS_SCRIPT_PATH="$HOME/${PS_SCRIPT_PATH_ARG:2}"
+        else
+            ABS_PS_SCRIPT_PATH="$PS_SCRIPT_PATH_ARG"
+        fi
+    else
+        ABS_PS_SCRIPT_PATH="$PWD/$PS_SCRIPT_PATH_ARG"
+    fi
+fi
+
+if [[ ! -f "$ABS_PS_SCRIPT_PATH" ]]; then
+    echo "Error: PowerShell script not found at '$ABS_PS_SCRIPT_PATH' (resolved from '$PS_SCRIPT_PATH_ARG')" >&2
+    exit 1
+fi
+
+if ! command -v pwsh &> /dev/null; then
+    echo "Error: 'pwsh' (PowerShell) command not found." >&2
+    exit 1
+fi
+
+if [[ ! -f "$SETTINGS_FILE_PATH" ]]; then
+    echo "Error: PSScriptFormatter settings file not found at '$SETTINGS_FILE_PATH'." >&2
+    echo "Please create it with your formatting preferences (PSScriptAnalyzer rule-based)." >&2
+    exit 1
+fi
+
+echo "Attempting to format: '$ABS_PS_SCRIPT_PATH'"
+echo "Using settings from (path): '$SETTINGS_FILE_PATH'"
+echo "---"
+
+initial_timestamp=""
+# ... (timestamp logic same as before) ...
+if command -v stat &> /dev/null; then
+    if stat -c %Y "$ABS_PS_SCRIPT_PATH" &> /dev/null; then # GNU stat
+        initial_timestamp=$(stat -c %Y "$ABS_PS_SCRIPT_PATH")
+    elif stat -f %m "$ABS_PS_SCRIPT_PATH" &> /dev/null; then # macOS/BSD stat
+        initial_timestamp=$(stat -f %m "$ABS_PS_SCRIPT_PATH")
+    fi
+    [[ -n "$initial_timestamp" ]] && echo "Initial file timestamp: $initial_timestamp"
+fi
+
+
+CORE_PWSH_LOGIC=$(cat <<'EOF'
+$ErrorActionPreference = 'Stop'
+
+# $scriptToFormatPath and $settingsPath (file path) will be passed
+Write-Host "PowerShell side (inside invoked block):"
+Write-Host "  Script to format: $scriptToFormatPath"
+Write-Host "  Settings file path: $settingsPath" # Note: Changed from settingsContentString
+
+if (-not (Test-Path -Path $scriptToFormatPath -PathType Leaf)) {
+    Write-Error "FATAL: PowerShell cannot find the script at: '$scriptToFormatPath'"
+    exit 1
+}
+if (-not (Test-Path -Path $settingsPath -PathType Leaf)) { # Check the settings file path
+    Write-Error "FATAL: PowerShell cannot find the settings file at: '$settingsPath'"
+    exit 1
+}
+
+# ... (PSScriptAnalyzer module check and import remains the same) ...
+if (-not (Get-Module PSScriptAnalyzer -ListAvailable)) {
+    Write-Warning "PSScriptAnalyzer module not found. Attempting to install for current user..."
+    try {
+        Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop
+        Write-Host "PSScriptAnalyzer installed successfully." -ForegroundColor Green
+    } catch {
+        Write-Error "Failed to install PSScriptAnalyzer. Please install it manually and try again."
+        exit 1
+    }
+}
+Import-Module PSScriptAnalyzer -ErrorAction Stop
+
+try {
+    Write-Host "---"
+    Write-Host "Formatting script with Invoke-Formatter using PSScriptAnalyzer-style settings file..."
+
+    $originalContent = Get-Content -Path $scriptToFormatPath -Raw -Encoding UTF8
+    # Pass the $settingsPath (file path) directly
+    $formattedContent = Invoke-Formatter -ScriptDefinition $originalContent -Settings $settingsPath -ErrorAction Stop
+
+    if ($formattedContent -ne $originalContent) {
+        Set-Content -Path $scriptToFormatPath -Value $formattedContent -Encoding UTF8 -Force
+        Write-Host "Script '$scriptToFormatPath' has been formatted." -ForegroundColor Green
+    } else {
+        Write-Host "Script '$scriptToFormatPath' is already formatted according to the PSSA settings. No changes made." -ForegroundColor Cyan
+    }
+
+} catch {
+    $errorMessage = "An error occurred during formatting with Invoke-Formatter (PSSA-style settings):`n"
+    $errorMessage += "Exception Type: $($_.Exception.GetType().FullName)`n"
+    $errorMessage += "Exception Message: $($_.Exception.Message)`n"
+    if ($_.ScriptStackTrace) {
+        $errorMessage += "ScriptStackTrace:`n$($_.ScriptStackTrace)`n"
+    }
+    if ($_.Exception.InnerException) {
+        $errorMessage += "Inner Exception Type: $($_.Exception.InnerException.GetType().FullName)`n"
+        $errorMessage += "Inner Exception Message: $($_.Exception.InnerException.Message)`n"
+    }
+    Write-Output $errorMessage
+    exit 1
+}
+EOF
+)
+
+# Pass the path to the settings file
+FULL_PWSH_COMMAND="& { param([string]\$scriptToFormatPath, [string]\$settingsPath); $CORE_PWSH_LOGIC } -scriptToFormatPath \"$ABS_PS_SCRIPT_PATH\" -settingsPath \"$SETTINGS_FILE_PATH\""
+
+if pwsh -NoProfile -Command "$FULL_PWSH_COMMAND"; then
+    echo "---"
+    echo "PowerShell script execution finished."
+    # ... (timestamp logic same as before) ...
+    if [[ -n "$initial_timestamp" ]]; then
+        final_timestamp=""
+        if stat -c %Y "$ABS_PS_SCRIPT_PATH" &> /dev/null; then
+            final_timestamp=$(stat -c %Y "$ABS_PS_SCRIPT_PATH")
+        elif stat -f %m "$ABS_PS_SCRIPT_PATH" &> /dev/null; then
+            final_timestamp=$(stat -f %m "$ABS_PS_SCRIPT_PATH")
+        fi
+
+        if [[ -n "$final_timestamp" ]]; then
+            echo "Final file timestamp: $final_timestamp"
+            if [[ "$initial_timestamp" != "$final_timestamp" ]]; then
+                echo "RESULT: File '$ABS_PS_SCRIPT_PATH' WAS MODIFIED."
+            else
+                echo "RESULT: File '$ABS_PS_SCRIPT_PATH' was NOT modified (timestamp unchanged)."
+            fi
+        else
+            echo "Warning: Could not get final file timestamp." >&2
+        fi
+    fi
+else
+    echo "---" >&2
+    echo "Error: PowerShell formatter script execution failed. See details above." >&2
+    exit 1
+fi
+
+exit 0

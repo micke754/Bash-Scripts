@@ -1,0 +1,29 @@
+#!/bin/bash
+
+# Define bracketed paste sequences
+BRACKETED_PASTE_START=$'\033[200~'
+BRACKETED_PASTE_END=$'\033[201~'
+
+# Get clipboard content (use xsel or xclip on Linux if needed)
+clipboard_content=$(xsel --clipboard --output)
+
+# Check if clipboard content is empty
+if [[ -z "$clipboard_content" ]]; then
+  echo "Clipboard is empty. Nothing to paste."
+  exit 1
+fi
+
+# Wrap clipboard content in bracketed paste sequences
+bracketed_content="${BRACKETED_PASTE_START}${clipboard_content}${BRACKETED_PASTE_END}"
+
+# Switch focus to the next pane
+zellij action focus-next-pane
+
+# Write the bracketed content to the current pane
+zellij action write-chars "$bracketed_content"
+
+# Simulate pressing Enter (ASCII 13 + ASCII 10)
+zellij action write 13 10
+
+# Return focus to the next pane
+zellij action focus-next-pane
