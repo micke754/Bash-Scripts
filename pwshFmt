@@ -176,7 +176,7 @@ EOF
     FULL_PWSH_COMMAND_STDIN="\$scriptContent = \$env:PWSHFMT_SCRIPT_CONTENT; & { param([string]\$settingsPathOrNull); $CORE_PWSH_LOGIC_STDIN } -settingsPathOrNull \"$settings_arg_val_stdin\""
 
 
-    if pwsh -NoProfile -Command "$FULL_PWSH_COMMAND_STDIN"; then
+    if pwsh -NoProfile -NoLogo -Command "$FULL_PWSH_COMMAND_STDIN"; then
         unset PWSHFMT_SCRIPT_CONTENT
         exit 0
     else
@@ -302,7 +302,7 @@ trap 'rm -f "$pwsh_output_capture_file"' EXIT
 
 execution_succeeded=false
 # ... (pwsh execution and post-processing - UNCHANGED) ...
-if pwsh -NoProfile -Command "$FULL_PWSH_COMMAND_FILE" > "$pwsh_output_capture_file" 2>&1; then
+if pwsh -NoProfile -NoLogo -Command "$FULL_PWSH_COMMAND_FILE" > "$pwsh_output_capture_file" 2>&1; then
     execution_succeeded=true
 else
     execution_succeeded=false
