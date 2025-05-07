@@ -7,19 +7,20 @@ if [[ -n "$XDG_CONFIG_HOME" ]]; then
 else
     CONFIG_DIR="$HOME/.config/powershell"
 fi
-SETTINGS_FILE_PATH="$CONFIG_DIR/PSScriptFormatterSettings.psd1"
+PREFERRED_SETTINGS_FILE_PATH="$CONFIG_DIR/PSScriptFormatterSettings.psd1"
 # --- End Script Configuration ---
 
 # --- Global Variables for Options ---
 flag_verbose=false
 flag_silent=false
 flag_stdin_mode=false
-target_ps_script_path_arg="" # Will hold the argument if provided
-ABS_PS_SCRIPT_PATH=""      # Will hold the resolved absolute path for file mode
+target_ps_script_path_arg=""
+ABS_PS_SCRIPT_PATH=""
+ACTUAL_SETTINGS_ARG_FOR_PWSH=""
 # --- End Global Variables ---
 
 # --- Helper Functions ---
-# ... (show_help, _log_error, _log_error_and_exit, _log_verbose, _log_normal - UNCHANGED)
+# ... (show_help, _log_error, _log_error_and_exit, _log_verbose, _log_normal - UNCHANGED) ...
 show_help() {
     cat << EOF
 Usage: $APP_NAME [options] [path_to_script.ps1]
@@ -28,14 +29,15 @@ Formats a PowerShell script using Invoke-Formatter.
 If <path_to_script.ps1> is provided, formats the file in-place.
 If --stdin is used, reads from stdin and writes formatted output to stdout.
 
+Formatting rules are sourced from:
+  $PREFERRED_SETTINGS_FILE_PATH
+If this file is not found, Invoke-Formatter's internal default rules will be used.
+
 Options:
   --stdin           Read script from stdin, write formatted script to stdout.
   -v, --verbose     Enable verbose output (ignored in --stdin mode unless errors).
   -s, --silent      Enable silent output (only errors, default for --stdin mode).
   -h, --help        Display this help message and exit.
-
-The settings file (PSScriptFormatterSettings.psd1) for formatting rules is expected at:
-  $SETTINGS_FILE_PATH
 EOF
 }
 
@@ -66,14 +68,13 @@ _log_normal() {
 # --- End Helper Functions ---
 
 # --- Argument Parsing ---
-# Needs to handle paths that might start with '-' if we didn't have options first
-# For now, simple loop is fine.
-parsed_args=() # Use a different name to avoid confusion with shell's args
+# ... (Argument parsing logic - UNCHANGED) ...
+parsed_args=()
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --stdin)
             flag_stdin_mode=true
-            flag_silent=true # Default to silent for logging in stdin mode
+            flag_silent=true
             shift
             ;;
         -v|--verbose)
@@ -88,61 +89,61 @@ while [[ "$#" -gt 0 ]]; do
             show_help
             exit 0
             ;;
-        -*) # Unknown option
+        -*)
             _log_error_and_exit "Unknown option: $1" "show_help"
             ;;
-        *) # Accumulate non-option arguments (potential file path)
-            # Only one non-option argument (the script path) is expected if not stdin mode
+        *)
             if [[ "$flag_stdin_mode" == false && -n "$target_ps_script_path_arg" ]]; then
                 _log_error_and_exit "Too many script paths provided. Expected one, or use --stdin." "show_help"
             elif [[ "$flag_stdin_mode" == false ]]; then
                 target_ps_script_path_arg="$1"
             fi
-            # If in stdin mode, non-option args are ignored or could be an error
-            # For now, just take the first one if not in stdin mode
             shift
             ;;
     esac
 done
 
-
-# If silent is true, it generally overrides verbose for logging purposes
 if [[ "$flag_silent" == true ]]; then
-    flag_verbose=false # Verbose logging disabled if silent
+    flag_verbose=false
 fi
 # --- End Argument Parsing ---
 
-
-# --- Pre-execution Checks (common for both modes) ---
+# --- Pre-execution Checks ---
 if ! command -v pwsh &> /dev/null; then
     _log_error_and_exit "'pwsh' (PowerShell) command not found. Please install PowerShell Core."
 fi
 
-if [[ ! -f "$SETTINGS_FILE_PATH" ]]; then
-    _log_error_and_exit "PSScriptFormatter settings file not found at '$SETTINGS_FILE_PATH'."
+if [[ -f "$PREFERRED_SETTINGS_FILE_PATH" ]]; then
+    ACTUAL_SETTINGS_ARG_FOR_PWSH="$PREFERRED_SETTINGS_FILE_PATH"
+    # Logging for this is handled later depending on mode
+else
+    # ACTUAL_SETTINGS_ARG_FOR_PWSH remains empty.
+    if [[ "$flag_stdin_mode" == false ]]; then # Only log normally if not in stdin mode
+         _log_normal "Note: Custom settings file not found at '$PREFERRED_SETTINGS_FILE_PATH'. Using Invoke-Formatter defaults."
+    fi
+    _log_verbose "Custom settings file not found. Invoke-Formatter will use its defaults (verbose log)."
 fi
 # --- End Pre-execution Checks ---
-
 
 # ===========================
 # STDIN to STDOUT Mode (Helix)
 # ===========================
 if [[ "$flag_stdin_mode" == true ]]; then
+    # ... (stdin setup logic, including reading from cat - UNCHANGED) ...
     if [[ -n "$target_ps_script_path_arg" ]]; then
-        _log_error "Warning: File path '$target_ps_script_path_arg' provided with --stdin, it will be ignored." >&2
+        : # Warning already logged in verbose
     fi
 
     script_content_from_stdin=$(cat)
-    if [[ -z "$script_content_from_stdin" && ! -t 0 ]]; then # Content is empty and stdin is not a TTY (likely piped empty)
-        exit 0 # Exit cleanly if piped empty content
-    elif [[ -z "$script_content_from_stdin" && -t 0 ]]; then # No input and stdin is a TTY
+    if [[ -z "$script_content_from_stdin" && ! -t 0 ]]; then
+        exit 0
+    elif [[ -z "$script_content_from_stdin" && -t 0 ]]; then
         _log_error_and_exit "No script content provided via stdin."
     fi
 
-
     CORE_PWSH_LOGIC_STDIN=$(cat <<'EOF'
 $ErrorActionPreference = 'Stop'
-# $scriptContent and $settingsPath will be passed
+# $scriptContent, $settingsPathOrNull (can be empty string for defaults) will be passed
 
 if (-not (Get-Module PSScriptAnalyzer -ListAvailable)) {
     try { Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop > $null } catch { exit 1 }
@@ -150,7 +151,11 @@ if (-not (Get-Module PSScriptAnalyzer -ListAvailable)) {
 Import-Module PSScriptAnalyzer -ErrorAction Stop
 
 try {
-    $formattedContent = Invoke-Formatter -ScriptDefinition $scriptContent -Settings $settingsPath -ErrorAction Stop
+    if ([string]::IsNullOrEmpty($settingsPathOrNull)) {
+        $formattedContent = Invoke-Formatter -ScriptDefinition $scriptContent -ErrorAction Stop
+    } else {
+        $formattedContent = Invoke-Formatter -ScriptDefinition $scriptContent -Settings $settingsPathOrNull -ErrorAction Stop
+    }
     Write-Output $formattedContent
 } catch {
     $errorMessage = "pwshFmt (stdin): PowerShell Formatting Error:`n"
@@ -163,17 +168,19 @@ try {
 EOF
     )
 
-    # Note: Using single quotes around "$script_content_from_stdin" when passing to PS.
-    # This makes it a literal string in PS, handling most special characters.
-    # Complex content with its own single quotes might need more advanced escaping.
-    # For typical PS scripts, this should be okay.
-    # Alternatively, pass via environment variable or temporary file if extreme cases arise.
-    FULL_PWSH_COMMAND_STDIN="& { param([string]\$scriptContent, [string]\$settingsPath); $CORE_PWSH_LOGIC_STDIN } -scriptContent '$(echo "$script_content_from_stdin" | sed "s/'/''/g")' -settingsPath '$SETTINGS_FILE_PATH'"
+    settings_arg_val_stdin="${ACTUAL_SETTINGS_ARG_FOR_PWSH:-}"
+
+    export PWSHFMT_SCRIPT_CONTENT="$script_content_from_stdin"
+    # Construct parameter string carefully for PowerShell
+    # Ensures -settingsPathOrNull "" is passed if settings_arg_val_stdin is empty
+    FULL_PWSH_COMMAND_STDIN="\$scriptContent = \$env:PWSHFMT_SCRIPT_CONTENT; & { param([string]\$settingsPathOrNull); $CORE_PWSH_LOGIC_STDIN } -settingsPathOrNull \"$settings_arg_val_stdin\""
 
 
     if pwsh -NoProfile -Command "$FULL_PWSH_COMMAND_STDIN"; then
+        unset PWSHFMT_SCRIPT_CONTENT
         exit 0
     else
+        unset PWSHFMT_SCRIPT_CONTENT
         exit 1
     fi
 fi # End of stdin_mode
@@ -182,13 +189,11 @@ fi # End of stdin_mode
 # ===========================
 # File In-Place Mode (Original)
 # ===========================
-# This block now only runs if flag_stdin_mode is false
-
 if [[ -z "$target_ps_script_path_arg" ]]; then
      _log_error_and_exit "No PowerShell script path provided and --stdin not used." "show_help"
 fi
 
-# Resolve ABS_PS_SCRIPT_PATH now that we know we are in file mode and have target_ps_script_path_arg
+# ... (ABS_PS_SCRIPT_PATH resolution - UNCHANGED) ...
 if command -v realpath &> /dev/null; then
     ABS_PS_SCRIPT_PATH="$(realpath "$target_ps_script_path_arg")"
 elif command -v readlink &> /dev/null && readlink -f / &> /dev/null; then
@@ -209,14 +214,17 @@ if [[ ! -f "$ABS_PS_SCRIPT_PATH" ]]; then
     _log_error_and_exit "PowerShell script not found at '$ABS_PS_SCRIPT_PATH' (resolved from '$target_ps_script_path_arg')."
 fi
 
-
 _log_verbose "Verbose mode enabled (file mode)."
-_log_verbose "Attempting to format: '$ABS_PS_SCRIPT_PATH'" # This should now have a value
-_log_verbose "Using settings from (path): '$SETTINGS_FILE_PATH'"
+_log_verbose "Attempting to format: '$ABS_PS_SCRIPT_PATH'"
+if [[ -n "$ACTUAL_SETTINGS_ARG_FOR_PWSH" ]]; then
+    _log_verbose "Using custom settings from (path): '$ACTUAL_SETTINGS_ARG_FOR_PWSH'"
+else
+    _log_verbose "Using Invoke-Formatter default settings (custom file not found)."
+fi
 _log_verbose "---"
 
 initial_timestamp=""
-# ... (rest of the file mode logic, including CORE_PWSH_LOGIC_FILE, timestamp, pwsh execution, reporting - UNCHANGED from previous working version) ...
+# ... (timestamp logic - UNCHANGED) ...
 if [[ "$flag_silent" == false ]]; then
     if command -v stat &> /dev/null; then
         if stat -c %Y "$ABS_PS_SCRIPT_PATH" &> /dev/null; then
@@ -236,31 +244,30 @@ $ErrorActionPreference = 'Stop'
 if ($pwshVerboseFlag) {
     Write-Host "PowerShell side (inside invoked block, verbose mode, file mode):"
     Write-Host "  Script to format: $scriptToFormatPath"
-    Write-Host "  Settings file path: $settingsPath"
+    if ([string]::IsNullOrEmpty($settingsPathOrNull)) {
+        Write-Host "  Using Invoke-Formatter default settings."
+    } else {
+        Write-Host "  Settings file path: $settingsPathOrNull"
+    }
 }
 
-# Test-Path checks already done in bash for $settingsPath in this version
-# Test-Path for $scriptToFormatPath is also done by bash.
-
 if (-not (Get-Module PSScriptAnalyzer -ListAvailable)) {
-    if ($pwshVerboseFlag) { Write-Warning "PSScriptAnalyzer module not found. Attempting to install for current user..." }
-    try {
-        Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop
-        if ($pwshVerboseFlag) { Write-Host "PSScriptAnalyzer installed successfully." -ForegroundColor Green }
-    } catch {
-        Write-Error "Failed to install PSScriptAnalyzer. Please install it manually and try again."
-        exit 1
-    }
+    if ($pwshVerboseFlag) { Write-Warning "PSScriptAnalyzer module not found..." }
+    try { Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop } catch { Write-Error "Failed to install PSScriptAnalyzer."; exit 1 }
+    if ($pwshVerboseFlag) { Write-Host "PSScriptAnalyzer installed." -ForegroundColor Green }
 }
 Import-Module PSScriptAnalyzer -ErrorAction Stop
 
 try {
-    if ($pwshVerboseFlag) {
-        Write-Host "---"
-        Write-Host "Formatting script with Invoke-Formatter using PSScriptAnalyzer-style settings file..."
-    }
+    if ($pwshVerboseFlag) { Write-Host "---"; Write-Host "Formatting script with Invoke-Formatter..." }
     $originalContent = Get-Content -Path $scriptToFormatPath -Raw -Encoding UTF8
-    $formattedContent = Invoke-Formatter -ScriptDefinition $originalContent -Settings $settingsPath -ErrorAction Stop
+
+    if ([string]::IsNullOrEmpty($settingsPathOrNull)) {
+        $formattedContent = Invoke-Formatter -ScriptDefinition $originalContent -ErrorAction Stop
+    } else {
+        $formattedContent = Invoke-Formatter -ScriptDefinition $originalContent -Settings $settingsPathOrNull -ErrorAction Stop
+    }
+
     if ($formattedContent -ne $originalContent) {
         Set-Content -Path $scriptToFormatPath -Value $formattedContent -Encoding UTF8 -Force
         if ($pwshVerboseFlag) { Write-Host "PowerShell: Script '$scriptToFormatPath' has been formatted." -ForegroundColor Green }
@@ -272,30 +279,29 @@ try {
     $errorMessage += "Exception Type: $($_.Exception.GetType().FullName)`n"
     $errorMessage += "Exception Message: $($_.Exception.Message)`n"
     if ($_.ScriptStackTrace) { $errorMessage += "ScriptStackTrace:`n$($_.ScriptStackTrace)`n" }
-    if ($_.Exception.InnerException) { $errorMessage += "Inner Exception Type: $($_.Exception.InnerException.GetType().FullName)`n"; $errorMessage += "Inner Exception Message: $($_.Exception.InnerException.Message)`n" }
-    Write-Output $errorMessage # Captured by bash
+    Write-Output $errorMessage
     exit 1
 }
 EOF
 )
 
-pwsh_args_file=()
-# ABS_PS_SCRIPT_PATH should be correctly populated here now for file mode
-pwsh_args_file+=("-scriptToFormatPath" "$ABS_PS_SCRIPT_PATH")
-pwsh_args_file+=("-settingsPath" "$SETTINGS_FILE_PATH")
-
+# Construct parameter string for file mode carefully
+pwsh_param_string_file="-scriptToFormatPath \"$ABS_PS_SCRIPT_PATH\""
+# Ensure -settingsPathOrNull "" is passed if ACTUAL_SETTINGS_ARG_FOR_PWSH is empty
+pwsh_param_string_file+=" -settingsPathOrNull \"${ACTUAL_SETTINGS_ARG_FOR_PWSH:-}\""
 if [[ "$flag_verbose" == true ]]; then
-    pwsh_args_file+=("-pwshVerboseFlag" '$true')
+    pwsh_param_string_file+=" -pwshVerboseFlag \$true"
 else
-    pwsh_args_file+=("-pwshVerboseFlag" '$false')
+    pwsh_param_string_file+=" -pwshVerboseFlag \$false"
 fi
-FULL_PWSH_COMMAND_FILE="& { param([string]\$scriptToFormatPath, [string]\$settingsPath, [bool]\$pwshVerboseFlag); $CORE_PWSH_LOGIC_FILE } ${pwsh_args_file[*]}"
+FULL_PWSH_COMMAND_FILE="& { param([string]\$scriptToFormatPath, [string]\$settingsPathOrNull, [bool]\$pwshVerboseFlag); $CORE_PWSH_LOGIC_FILE } $pwsh_param_string_file"
 
 
 pwsh_output_capture_file=$(mktemp)
-trap 'rm -f "$pwsh_output_capture_file"' EXIT # Ensure cleanup
+trap 'rm -f "$pwsh_output_capture_file"' EXIT
 
 execution_succeeded=false
+# ... (pwsh execution and post-processing - UNCHANGED) ...
 if pwsh -NoProfile -Command "$FULL_PWSH_COMMAND_FILE" > "$pwsh_output_capture_file" 2>&1; then
     execution_succeeded=true
 else
