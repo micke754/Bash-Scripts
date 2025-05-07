@@ -13,11 +13,13 @@ SETTINGS_FILE_PATH="$CONFIG_DIR/PSScriptFormatterSettings.psd1"
 # --- Global Variables for Options ---
 flag_verbose=false
 flag_silent=false
-flag_stdin_mode=false # New flag for Helix mode
-target_ps_script_path_arg=""
+flag_stdin_mode=false
+target_ps_script_path_arg="" # Will hold the argument if provided
+ABS_PS_SCRIPT_PATH=""      # Will hold the resolved absolute path for file mode
 # --- End Global Variables ---
 
 # --- Helper Functions ---
+# ... (show_help, _log_error, _log_error_and_exit, _log_verbose, _log_normal - UNCHANGED)
 show_help() {
     cat << EOF
 Usage: $APP_NAME [options] [path_to_script.ps1]
@@ -51,14 +53,12 @@ _log_error_and_exit() {
 }
 
 _log_verbose() {
-    # In stdin_mode, verbose is effectively off for general logging to avoid polluting stdout
     if [[ "$flag_stdin_mode" == false && "$flag_verbose" == true ]]; then
         echo "$@"
     fi
 }
 
 _log_normal() {
-    # In stdin_mode, normal logging is off to avoid polluting stdout
     if [[ "$flag_stdin_mode" == false && "$flag_silent" == false ]]; then
         echo "$@"
     fi
@@ -66,14 +66,14 @@ _log_normal() {
 # --- End Helper Functions ---
 
 # --- Argument Parsing ---
-args=()
+# Needs to handle paths that might start with '-' if we didn't have options first
+# For now, simple loop is fine.
+parsed_args=() # Use a different name to avoid confusion with shell's args
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --stdin)
             flag_stdin_mode=true
-            # In stdin mode, we typically want silent behavior for logging,
-            # as stdout is reserved for the formatted script.
-            flag_silent=true
+            flag_silent=true # Default to silent for logging in stdin mode
             shift
             ;;
         -v|--verbose)
@@ -92,26 +92,23 @@ while [[ "$#" -gt 0 ]]; do
             _log_error_and_exit "Unknown option: $1" "show_help"
             ;;
         *) # Accumulate non-option arguments (potential file path)
-            args+=("$1")
+            # Only one non-option argument (the script path) is expected if not stdin mode
+            if [[ "$flag_stdin_mode" == false && -n "$target_ps_script_path_arg" ]]; then
+                _log_error_and_exit "Too many script paths provided. Expected one, or use --stdin." "show_help"
+            elif [[ "$flag_stdin_mode" == false ]]; then
+                target_ps_script_path_arg="$1"
+            fi
+            # If in stdin mode, non-option args are ignored or could be an error
+            # For now, just take the first one if not in stdin mode
             shift
             ;;
     esac
 done
 
-# Assign positional arguments (script path)
-if [[ "$flag_stdin_mode" == false ]]; then
-    if [[ ${#args[@]} -eq 1 ]]; then
-        target_ps_script_path_arg="${args[0]}"
-    elif [[ ${#args[@]} -gt 1 ]]; then
-        _log_error_and_exit "Too many script paths provided. Expected one, or use --stdin." "show_help"
-    elif [[ ${#args[@]} -eq 0 ]]; then
-         _log_error_and_exit "No PowerShell script path provided and --stdin not used." "show_help"
-    fi
-fi
 
 # If silent is true, it generally overrides verbose for logging purposes
 if [[ "$flag_silent" == true ]]; then
-    flag_verbose=false
+    flag_verbose=false # Verbose logging disabled if silent
 fi
 # --- End Argument Parsing ---
 
@@ -122,7 +119,6 @@ if ! command -v pwsh &> /dev/null; then
 fi
 
 if [[ ! -f "$SETTINGS_FILE_PATH" ]]; then
-    # This check is still important as settings are used in both modes
     _log_error_and_exit "PSScriptFormatter settings file not found at '$SETTINGS_FILE_PATH'."
 fi
 # --- End Pre-execution Checks ---
@@ -132,75 +128,95 @@ fi
 # STDIN to STDOUT Mode (Helix)
 # ===========================
 if [[ "$flag_stdin_mode" == true ]]; then
-    # Read script content from stdin
-    script_content_from_stdin=$(cat)
-
-    if [[ -z "$script_content_from_stdin" ]]; then
-        # If stdin is empty, output nothing (or an empty string) and exit cleanly.
-        # Helix might send an empty buffer.
-        exit 0
+    if [[ -n "$target_ps_script_path_arg" ]]; then
+        _log_error "Warning: File path '$target_ps_script_path_arg' provided with --stdin, it will be ignored." >&2
     fi
 
-    # PowerShell logic for stdin mode
-    # Outputs formatted script to its STDOUT, or error details to its STDERR.
+    script_content_from_stdin=$(cat)
+    if [[ -z "$script_content_from_stdin" && ! -t 0 ]]; then # Content is empty and stdin is not a TTY (likely piped empty)
+        exit 0 # Exit cleanly if piped empty content
+    elif [[ -z "$script_content_from_stdin" && -t 0 ]]; then # No input and stdin is a TTY
+        _log_error_and_exit "No script content provided via stdin."
+    fi
+
+
     CORE_PWSH_LOGIC_STDIN=$(cat <<'EOF'
 $ErrorActionPreference = 'Stop'
 # $scriptContent and $settingsPath will be passed
-# $pwshVerboseFlag is less relevant here as stdout is sacred
 
-# No Test-Path for settings here if we assume it was checked by bash
-# No module install messages to stdout
-
-# Ensure PSScriptAnalyzer is available
 if (-not (Get-Module PSScriptAnalyzer -ListAvailable)) {
-    # Attempt install silently, errors will go to stderr if they occur
     try { Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop > $null } catch { exit 1 }
 }
 Import-Module PSScriptAnalyzer -ErrorAction Stop
 
 try {
-    # $settingsPath is the path to the .psd1 file
     $formattedContent = Invoke-Formatter -ScriptDefinition $scriptContent -Settings $settingsPath -ErrorAction Stop
-    Write-Output $formattedContent # This is the crucial part for Helix: formatted script to STDOUT
+    Write-Output $formattedContent
 } catch {
-    # For Helix, error details should go to STDERR
-    $errorMessage = "$($APP_NAME): PowerShell Formatting Error:`n" # APP_NAME won't expand here, fine
+    $errorMessage = "pwshFmt (stdin): PowerShell Formatting Error:`n"
     $errorMessage += "Exception Type: $($_.Exception.GetType().FullName)`n"
     $errorMessage += "Exception Message: $($_.Exception.Message)`n"
-    if ($_.ScriptStackTrace) {
-        $errorMessage += "ScriptStackTrace:`n$($_.ScriptStackTrace)`n"
-    }
-    Write-Error $errorMessage # Send to STDERR
+    if ($_.ScriptStackTrace) { $errorMessage += "ScriptStackTrace:`n$($_.ScriptStackTrace)`n" }
+    Write-Error $errorMessage # To STDERR
     exit 1
 }
 EOF
     )
 
-    pwsh_args_stdin=("-scriptContent" "$script_content_from_stdin" "-settingsPath" "$SETTINGS_FILE_PATH")
-    # pwshVerboseFlag not really used for logging output in stdin mode
-    # pwsh_args_stdin+=("-pwshVerboseFlag" '$false')
+    # Note: Using single quotes around "$script_content_from_stdin" when passing to PS.
+    # This makes it a literal string in PS, handling most special characters.
+    # Complex content with its own single quotes might need more advanced escaping.
+    # For typical PS scripts, this should be okay.
+    # Alternatively, pass via environment variable or temporary file if extreme cases arise.
+    FULL_PWSH_COMMAND_STDIN="& { param([string]\$scriptContent, [string]\$settingsPath); $CORE_PWSH_LOGIC_STDIN } -scriptContent '$(echo "$script_content_from_stdin" | sed "s/'/''/g")' -settingsPath '$SETTINGS_FILE_PATH'"
 
-    FULL_PWSH_COMMAND_STDIN="& { param([string]\$scriptContent, [string]\$settingsPath); $CORE_PWSH_LOGIC_STDIN } ${pwsh_args_stdin[*]}"
 
-    # Execute PowerShell. Its STDOUT is what Helix wants. STDERR for errors.
-    # We don't need to capture output in a file here; let it flow.
     if pwsh -NoProfile -Command "$FULL_PWSH_COMMAND_STDIN"; then
-        exit 0 # Success, formatted output went to stdout
+        exit 0
     else
-        exit 1 # Failure, PowerShell script should have written error to its stderr
+        exit 1
     fi
-fi
+fi # End of stdin_mode
 
 
 # ===========================
 # File In-Place Mode (Original)
 # ===========================
+# This block now only runs if flag_stdin_mode is false
+
+if [[ -z "$target_ps_script_path_arg" ]]; then
+     _log_error_and_exit "No PowerShell script path provided and --stdin not used." "show_help"
+fi
+
+# Resolve ABS_PS_SCRIPT_PATH now that we know we are in file mode and have target_ps_script_path_arg
+if command -v realpath &> /dev/null; then
+    ABS_PS_SCRIPT_PATH="$(realpath "$target_ps_script_path_arg")"
+elif command -v readlink &> /dev/null && readlink -f / &> /dev/null; then
+    ABS_PS_SCRIPT_PATH="$(readlink -f "$target_ps_script_path_arg")"
+else
+    if [[ "${target_ps_script_path_arg:0:1}" == "/" ]] || [[ "${target_ps_script_path_arg:0:2}" == "~/" ]]; then
+        if [[ "${target_ps_script_path_arg:0:2}" == "~/" ]]; then
+            ABS_PS_SCRIPT_PATH="$HOME/${target_ps_script_path_arg:2}"
+        else
+            ABS_PS_SCRIPT_PATH="$target_ps_script_path_arg"
+        fi
+    else
+        ABS_PS_SCRIPT_PATH="$PWD/$target_ps_script_path_arg"
+    fi
+fi
+
+if [[ ! -f "$ABS_PS_SCRIPT_PATH" ]]; then
+    _log_error_and_exit "PowerShell script not found at '$ABS_PS_SCRIPT_PATH' (resolved from '$target_ps_script_path_arg')."
+fi
+
+
 _log_verbose "Verbose mode enabled (file mode)."
-_log_verbose "Attempting to format: '$ABS_PS_SCRIPT_PATH'"
+_log_verbose "Attempting to format: '$ABS_PS_SCRIPT_PATH'" # This should now have a value
 _log_verbose "Using settings from (path): '$SETTINGS_FILE_PATH'"
 _log_verbose "---"
 
 initial_timestamp=""
+# ... (rest of the file mode logic, including CORE_PWSH_LOGIC_FILE, timestamp, pwsh execution, reporting - UNCHANGED from previous working version) ...
 if [[ "$flag_silent" == false ]]; then
     if command -v stat &> /dev/null; then
         if stat -c %Y "$ABS_PS_SCRIPT_PATH" &> /dev/null; then
@@ -223,14 +239,8 @@ if ($pwshVerboseFlag) {
     Write-Host "  Settings file path: $settingsPath"
 }
 
-if (-not (Test-Path -Path $scriptToFormatPath -PathType Leaf)) {
-    Write-Error "FATAL: PowerShell cannot find the script at: '$scriptToFormatPath'"
-    exit 1
-}
-if (-not (Test-Path -Path $settingsPath -PathType Leaf)) {
-    Write-Error "FATAL: PowerShell cannot find the settings file at: '$settingsPath'"
-    exit 1
-}
+# Test-Path checks already done in bash for $settingsPath in this version
+# Test-Path for $scriptToFormatPath is also done by bash.
 
 if (-not (Get-Module PSScriptAnalyzer -ListAvailable)) {
     if ($pwshVerboseFlag) { Write-Warning "PSScriptAnalyzer module not found. Attempting to install for current user..." }
@@ -269,13 +279,18 @@ try {
 EOF
 )
 
-pwsh_args_file=("-scriptToFormatPath" "$ABS_PS_SCRIPT_PATH" "-settingsPath" "$SETTINGS_FILE_PATH")
+pwsh_args_file=()
+# ABS_PS_SCRIPT_PATH should be correctly populated here now for file mode
+pwsh_args_file+=("-scriptToFormatPath" "$ABS_PS_SCRIPT_PATH")
+pwsh_args_file+=("-settingsPath" "$SETTINGS_FILE_PATH")
+
 if [[ "$flag_verbose" == true ]]; then
     pwsh_args_file+=("-pwshVerboseFlag" '$true')
 else
     pwsh_args_file+=("-pwshVerboseFlag" '$false')
 fi
 FULL_PWSH_COMMAND_FILE="& { param([string]\$scriptToFormatPath, [string]\$settingsPath, [bool]\$pwshVerboseFlag); $CORE_PWSH_LOGIC_FILE } ${pwsh_args_file[*]}"
+
 
 pwsh_output_capture_file=$(mktemp)
 trap 'rm -f "$pwsh_output_capture_file"' EXIT # Ensure cleanup
