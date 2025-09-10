@@ -1,0 +1,28 @@
+#!/bin/zsh
+# ~/Bash-Scripts/wezterm-to-repl
+
+clipboard=$(pbpaste)
+if [[ -z "$clipboard" ]]; then
+    echo "No code to send"
+    exit 1
+fi
+
+# Get pane info
+pane_info=$(wezterm cli list --format json)
+
+# Priority 1: Find pane with REPL process names in title
+repl_pane_id=$(echo "$pane_info" | jq -r '.[] | select(.title | test("python|steel|nu|node|julia|ipython|repl"; "i")) | .pane_id' | head -1)
+
+# Priority 2: If no REPL found, use any non-Helix pane
+if [[ -z "$repl_pane_id" || "$repl_pane_id" == "null" ]]; then
+    repl_pane_id=$(echo "$pane_info" | jq -r '.[] | select(.title | test("hx|helix"; "i") | not) | .pane_id' | head -1)
+fi
+
+if [[ -n "$repl_pane_id" && "$repl_pane_id" != "null" ]]; then
+    printf "%s" "$clipboard" | wezterm cli send-text --pane-id "$repl_pane_id" 
+    printf "\r" | wezterm cli send-text --no-paste --pane-id "$repl_pane_id" 
+    # echo "Sent to pane $repl_pane_id"
+else
+    echo "No suitable pane found"
+    exit 1
+fi

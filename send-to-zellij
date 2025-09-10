@@ -5,7 +5,7 @@
 # BRACKETED_PASTE_END=$'\033[201~'
 
 # Get clipboard content (use xsel or xclip on Linux if needed)
-clipboard_content=$(xsel --clipboard --output)
+clipboard_content=$(pbpaste)
 
 # Check if clipboard content is empty
 if [[ -z "$clipboard_content" ]]; then
@@ -17,7 +17,7 @@ fi
 # bracketed_content="${BRACKETED_PASTE_START}${clipboard_content}${BRACKETED_PASTE_END}"
 
 # Switch focus to the next pane
-zellij action focus-next-pane
+zellij action move-focus down
 
 # Write the bracketed content to the current pane
 zellij action write-chars "$clipboard_content"
