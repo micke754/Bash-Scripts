@@ -11,8 +11,8 @@ fi
 pane_info=$(wezterm cli list --format json)
 
 # Useful debugging
-echo "REPL matches:"
-echo "$pane_info" | jq -r '.[] | select(.title | test("> (python|steel|node|julia|ipython|repl)\\b"; "i")) | {pane_id, title}'
+# echo "REPL matches:"
+# echo "$pane_info" | jq -r '.[] | select(.title | test("> (python|steel|node|julia|ipython|repl)\\b"; "i")) | {pane_id, title}'
 
 # 1. Get current workspace
 current_workspace=$(wezterm cli list --format json | jq -r '.[] | select(.is_active == true) | .workspace' | sort | uniq -c | sort -nr | head -1 | awk '{print $2}')
@@ -20,12 +20,6 @@ current_workspace=$(wezterm cli list --format json | jq -r '.[] | select(.is_act
 # 2. Filter by workspace + fixed REPL regex
 repl_pane_id=$(echo "$pane_info" | jq -r --arg workspace "$current_workspace" \
   '.[] | select(.workspace == $workspace) | select(.title | test("> (python|steel|node|julia|ipython|repl)\\b"; "i")) | .pane_id' | head -1)
-
-# # 3. Fallback: non-Helix in current workspace only
-# if [[ -z "$repl_pane_id" || "$repl_pane_id" == "null" ]]; then
-#     repl_pane_id=$(echo "$pane_info" | jq -r --arg workspace "$current_workspace" \
-#       '.[] | select(.workspace == $workspace) | select(.title | test("> (hx|helix)\\b"; "i") | not) | .pane_id' | head -1)
-# fi
 
 if [[ -n "$repl_pane_id" && "$repl_pane_id" != "null" ]]; then
     printf "%s" "$clipboard" | wezterm cli send-text --pane-id "$repl_pane_id" 
