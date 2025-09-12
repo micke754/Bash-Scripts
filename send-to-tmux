@@ -20,6 +20,6 @@ tmux send-keys -t right C-l
 
 # Send the content to the target tmux pane
 
-tmux set-buffer "$bracketed_text"          # Set the clipboard content as tmux buffer
-tmux paste-buffer -t right                 # Paste buffer to the 'right' pane
-tmux send-keys -t right Enter              # Simulate pressing 'Enter' in the 'right' pane
+tmux set-buffer "$bracketed_text" # Set the clipboard content as tmux buffer
+tmux paste-buffer -t right        # Paste buffer to the 'right' pane
+tmux send-keys -t right Enter     # Simulate pressing 'Enter' in the 'right' pane
