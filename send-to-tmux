@@ -16,6 +16,7 @@ BRACKETED_PASTE_END=$'\033[201~'
 # Wrap the clipboard text in bracketed paste sequences
 bracketed_text="${BRACKETED_PASTE_START}${clipboard_text}${BRACKETED_PASTE_END}"
 
+# The return should not be bracketed
 tmux send-keys -t right C-l
 
 # Send the content to the target tmux pane
