@@ -1,0 +1,2 @@
+#!/bin/bash
+xsel -b | databricks-repl-go execute --limit 10
