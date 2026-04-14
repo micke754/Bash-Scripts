@@ -8,10 +8,10 @@ if ! xsel --clipboard --output | grep -q .; then
 fi
 
 # The return should not be bracketed.
-tmux send-keys -t right C-l
+tmux send-keys -t '{down-of}' C-l
 
 # Stream clipboard into tmux buffer to avoid command-size limits,
 # then paste using tmux bracketed paste mode.
 xsel --clipboard --output | tmux load-buffer -
-tmux paste-buffer -p -t right
-tmux send-keys -t right Enter
+tmux paste-buffer -p -t '{down-of}'
+tmux send-keys -t '{down-of}' Enter
