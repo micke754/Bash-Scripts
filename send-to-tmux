@@ -13,9 +13,9 @@ tmux send-keys -t '{down-of}' C-l
 # Stream clipboard into tmux buffer to avoid command-size limits,
 # then paste using tmux bracketed paste mode.
 xsel --clipboard --output | tmux load-buffer -
-tmux send-keys -t '{down-of}' q
+# tmux send-keys -t '{down-of}' q
 tmux send-keys -t '{down-of}' Enter
 tmux paste-buffer -p -t '{down-of}'
 tmux send-keys -t '{down-of}' Enter
-tmux send-keys -t '{down-of}' ":pager"
-tmux send-keys -t '{down-of}' Enter
+# tmux send-keys -t '{down-of}' ":pager"
+# tmux send-keys -t '{down-of}' Enter
