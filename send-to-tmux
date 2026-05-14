@@ -16,6 +16,6 @@ xsel --clipboard --output | tmux load-buffer -
 # tmux send-keys -t '{down-of}' q
 tmux send-keys -t '{down-of}' Enter
 tmux paste-buffer -p -t '{down-of}'
-tmux send-keys -t '{down-of}' Enter
+# tmux send-keys -t '{down-of}' Enter
 # tmux send-keys -t '{down-of}' ":pager"
 # tmux send-keys -t '{down-of}' Enter
